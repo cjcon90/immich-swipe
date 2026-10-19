@@ -13,6 +13,7 @@ const {
   currentAsset,
   error,
   loadInitialAsset,
+  loadExternalDomain,
   keepPhoto,
   keepPhotoToAlbum,
   toggleFavorite,
@@ -116,6 +117,7 @@ watch(
 )
 
 onMounted(() => {
+  loadExternalDomain()
   loadInitialAsset()
   window.addEventListener('keydown', handleKeydown)
 })

@@ -67,23 +67,33 @@ export interface AddAssetsToAlbumRequest {
   ids: string[]
 }
 
+export interface ImmichTag {
+  id: string
+  name: string
+  value: string
+}
+
+// Subset of Immich's v3.2+ search filter
+export interface SearchFilter {
+  tagIds?: { none: string[] }
+  visibility?: { eq: 'timeline' }
+  type?: { eq: 'IMAGE' | 'VIDEO' }
+}
+
 export interface MetadataSearchRequest {
-  take?: number
-  skip?: number
-  page?: number
-  size?: number
-  order?: 'asc' | 'desc'
-  assetType?: ('IMAGE' | 'VIDEO')[]
+  size: number
+  filter: SearchFilter
+  orderBy: {
+    field: 'fileCreatedAt'
+    direction: 'asc' | 'desc'
+  }
+  cursor?: string
 }
 
 export interface MetadataSearchResponse {
-  items?: ImmichAsset[]
-  hasNextPage?: boolean
-  count?: number
-  nextPage?: string | number | null
-  assets?: {
-    total?: number
-    count?: number
+  assets: {
+    count: number
     items: ImmichAsset[]
+    nextCursor?: string | null
   }
 }

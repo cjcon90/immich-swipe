@@ -6,8 +6,10 @@ import { useReviewedStore } from '@/stores/reviewed'
 import type {
   ImmichAsset,
   ImmichAlbum,
+  ImmichTag,
   MetadataSearchRequest,
   MetadataSearchResponse,
+  SearchFilter,
 } from '@/types/immich'
 
 export function useImmich() {
@@ -20,18 +22,16 @@ export function useImmich() {
   const nextAsset = ref<ImmichAsset | null>(null)
   const pendingAssets = ref<ImmichAsset[]>([])
   const error = ref<string | null>(null)
-  const SKIP_VIDEOS_BATCH_SIZE = 10
-  const SKIP_VIDEOS_MAX_ATTEMPTS = 5
   const CHRONO_PAGE_SIZE = 50
   const RANDOM_BATCH_SIZE = 5
   const RANDOM_MAX_ATTEMPTS = 20
+  const KEPT_TAG = 'Swipe/Kept'
 
   const albumsCache = ref<ImmichAlbum[] | null>(null)
+  const keptTagId = ref<string | null>(null)
 
   const chronologicalQueue = ref<ImmichAsset[]>([])
-  const chronologicalSkip = ref(0)
-  const chronologicalPage = ref<number | null>(1)
-  const chronologicalPagingMode = ref<'skip' | 'page' | null>(null)
+  const chronologicalCursor = ref<string | null>(null)
   const chronologicalHasMore = ref(true)
   const isFetchingChronological = ref(false)
 
@@ -51,9 +51,7 @@ export function useImmich() {
 
   function resetReviewFlow() {
     chronologicalQueue.value = []
-    chronologicalSkip.value = 0
-    chronologicalPage.value = 1
-    chronologicalPagingMode.value = null
+    chronologicalCursor.value = null
     chronologicalHasMore.value = true
     nextAsset.value = null
     pendingAssets.value = []
@@ -64,6 +62,7 @@ export function useImmich() {
     () => [authStore.serverUrl, authStore.currentUserName],
     () => {
       albumsCache.value = null
+      keptTagId.value = null
       resetReviewFlow()
     }
   )
@@ -127,15 +126,52 @@ export function useImmich() {
     }
   }
 
+  // Kept assets carry this tag, so review progress lives in Immich rather than the browser
+  async function getKeptTagId(): Promise<string> {
+    if (keptTagId.value) return keptTagId.value
+    const tags = await apiRequest<ImmichTag[]>('/tags', {
+      method: 'PUT',
+      body: JSON.stringify({ tags: [KEPT_TAG] }),
+    })
+    keptTagId.value = tags[0].id
+    return keptTagId.value
+  }
+
+  async function setKeptTag(assetId: string, kept: boolean): Promise<void> {
+    const tagId = await getKeptTagId()
+    await apiRequest(`/tags/${tagId}/assets`, {
+      method: kept ? 'PUT' : 'DELETE',
+      body: JSON.stringify({ ids: [assetId] }),
+    })
+  }
+
+  async function unreviewedFilter(): Promise<SearchFilter> {
+    return {
+      tagIds: { none: [await getKeptTagId()] },
+      visibility: { eq: 'timeline' },
+      ...(uiStore.skipVideos ? { type: { eq: 'IMAGE' } } : {}),
+    }
+  }
+
+  async function loadExternalDomain(): Promise<void> {
+    try {
+      const config = await apiRequest<{ externalDomain: string }>('/server/config')
+      authStore.externalDomain = config.externalDomain.replace(/\/+$/, '')
+    } catch (e) {
+      console.error('Failed to load server config:', e)
+    }
+  }
+
   // Fetch a random asset
   async function fetchRandomAsset(): Promise<ImmichAsset | null> {
     try {
-      const attempts = uiStore.skipVideos ? SKIP_VIDEOS_MAX_ATTEMPTS : RANDOM_MAX_ATTEMPTS
-      for (let attempt = 0; attempt < attempts; attempt++) {
-        const count = uiStore.skipVideos ? SKIP_VIDEOS_BATCH_SIZE : RANDOM_BATCH_SIZE
-        const assets = await apiRequest<ImmichAsset[]>(`/assets/random?count=${count}`)
+      for (let attempt = 0; attempt < RANDOM_MAX_ATTEMPTS; attempt++) {
+        const assets = await apiRequest<ImmichAsset[]>('/search/random', {
+          method: 'POST',
+          body: JSON.stringify({ size: RANDOM_BATCH_SIZE, filter: await unreviewedFilter() }),
+        })
         if (!assets || assets.length === 0) {
-          continue
+          break
         }
 
         const candidate = assets.find(isReviewable)
@@ -145,89 +181,30 @@ export function useImmich() {
       if (uiStore.skipVideos) {
         throw new Error('No unreviewed photos found after skipping videos.')
       }
-      throw new Error('No unreviewed assets found. Clear the reviewed cache to start over.')
+      throw new Error('No unreviewed assets found.')
     } catch (e) {
       console.error('Failed to fetch random asset:', e)
       throw e
     }
   }
 
-  async function fetchChronologicalBatch(): Promise<{ items: ImmichAsset[]; hasMore: boolean; nextPage: number | null }> {
-    const order = preferencesStore.reviewOrder === 'chronological-desc' ? 'desc' : 'asc'
-    const usePagePagination = chronologicalPagingMode.value !== 'skip'
+  async function fetchChronologicalBatch(): Promise<{ items: ImmichAsset[]; nextCursor: string | null }> {
     const body: MetadataSearchRequest = {
-      order,
-      assetType: ['IMAGE', 'VIDEO'],
-    }
-    if (usePagePagination && chronologicalPage.value !== null) {
-      body.page = chronologicalPage.value
-      body.size = CHRONO_PAGE_SIZE
-    } else {
-      body.take = CHRONO_PAGE_SIZE
-      body.skip = chronologicalSkip.value
+      size: CHRONO_PAGE_SIZE,
+      filter: await unreviewedFilter(),
+      orderBy: {
+        field: 'fileCreatedAt',
+        direction: preferencesStore.reviewOrder === 'chronological-desc' ? 'desc' : 'asc',
+      },
+      ...(chronologicalCursor.value ? { cursor: chronologicalCursor.value } : {}),
     }
 
-    let response: MetadataSearchResponse | ImmichAsset[]
-    try {
-      response = await apiRequest<MetadataSearchResponse | ImmichAsset[]>('/search/metadata', {
-        method: 'POST',
-        body: JSON.stringify(body),
-      })
-    } catch (e) {
-      if (!usePagePagination || chronologicalPagingMode.value === 'skip') {
-        throw e
-      }
+    const response = await apiRequest<MetadataSearchResponse>('/search/metadata', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
 
-      chronologicalPagingMode.value = 'skip'
-      chronologicalPage.value = null
-      const fallbackBody: MetadataSearchRequest = {
-        order,
-        assetType: ['IMAGE', 'VIDEO'],
-        take: CHRONO_PAGE_SIZE,
-        skip: chronologicalSkip.value,
-      }
-      response = await apiRequest<MetadataSearchResponse | ImmichAsset[]>('/search/metadata', {
-        method: 'POST',
-        body: JSON.stringify(fallbackBody),
-      })
-    }
-
-    if (chronologicalPagingMode.value === null) {
-      if (Array.isArray(response)) {
-        chronologicalPagingMode.value = 'skip'
-        chronologicalPage.value = null
-      } else if (response?.nextPage !== undefined || response?.hasNextPage !== undefined) {
-        chronologicalPagingMode.value = 'page'
-      } else if (usePagePagination) {
-        chronologicalPagingMode.value = 'page'
-      } else {
-        chronologicalPagingMode.value = 'skip'
-        chronologicalPage.value = null
-      }
-    }
-
-    const items = Array.isArray(response)
-      ? response
-      : response?.assets?.items ?? response?.items ?? []
-
-    let hasMore = items.length === CHRONO_PAGE_SIZE
-    let nextPage: number | null = null
-
-    if (!Array.isArray(response)) {
-      if (typeof response.hasNextPage === 'boolean') {
-        hasMore = response.hasNextPage
-      } else if (response?.nextPage !== undefined && response?.nextPage !== null) {
-        hasMore = true
-        const parsedNext = Number(response.nextPage)
-        nextPage = Number.isNaN(parsedNext) ? null : parsedNext
-      } else if (typeof response.assets?.total === 'number' && typeof response.assets?.count === 'number') {
-        if (response.assets.total > response.assets.count) {
-          hasMore = true
-        }
-      }
-    }
-
-    return { items, hasMore, nextPage }
+    return { items: response.assets.items, nextCursor: response.assets.nextCursor ?? null }
   }
 
   async function fetchNextChronologicalAsset(): Promise<ImmichAsset | null> {
@@ -248,15 +225,8 @@ export function useImmich() {
 
     try {
       const batch = await fetchChronologicalBatch()
-      if (chronologicalPagingMode.value === 'skip') {
-        chronologicalSkip.value += batch.items.length
-      }
-      chronologicalHasMore.value = batch.hasMore
-      if (batch.nextPage !== null && !Number.isNaN(batch.nextPage)) {
-        chronologicalPage.value = batch.nextPage
-      } else if (chronologicalPage.value !== null && batch.hasMore) {
-        chronologicalPage.value += 1
-      }
+      chronologicalCursor.value = batch.nextCursor
+      chronologicalHasMore.value = batch.nextCursor !== null
 
       const filtered = batch.items.filter(isReviewable)
       chronologicalQueue.value.push(...filtered)
@@ -394,7 +364,7 @@ export function useImmich() {
     // Fetch owned + shared albums
     const [ownedAlbums, sharedAlbums] = await Promise.all([
       apiRequest<ImmichAlbum[]>('/albums'),
-      apiRequest<ImmichAlbum[]>('/albums?shared=true'),
+      apiRequest<ImmichAlbum[]>('/albums?isShared=true'),
     ])
 
     // Merge & deduplicate (by id)
@@ -461,6 +431,13 @@ export function useImmich() {
   async function keepPhoto(): Promise<void> {
     if (!currentAsset.value) return
     const assetToKeep = currentAsset.value
+    try {
+      await setKeptTag(assetToKeep.id, true)
+    } catch (e) {
+      console.error('Failed to tag asset as kept:', e)
+      uiStore.toast('Failed to keep photo', 'error')
+      return
+    }
     actionHistory.value.push({ asset: assetToKeep, type: 'keep' })
     reviewedStore.markReviewed(assetToKeep.id, 'keep')
     uiStore.incrementKept()
@@ -474,6 +451,7 @@ export function useImmich() {
     const assetToKeep = currentAsset.value
     try {
       await addAssetToAlbum(album.id, assetToKeep.id)
+      await setKeptTag(assetToKeep.id, true)
       preferencesStore.setLastUsedAlbumId(album.id)
       actionHistory.value.push({
         asset: assetToKeep,
@@ -507,6 +485,7 @@ export function useImmich() {
       currentAsset.value = updatedAsset
 
       if (nextFavorite) {
+        await setKeptTag(updatedAsset.id, true)
         actionHistory.value.push({ asset: updatedAsset, type: 'keep' })
         reviewedStore.markReviewed(updatedAsset.id, 'keep')
         uiStore.incrementKept()
@@ -568,6 +547,15 @@ export function useImmich() {
       return
     }
 
+    try {
+      await setKeptTag(lastAction.asset.id, false)
+    } catch (e) {
+      console.error('Failed to remove kept tag:', e)
+      actionHistory.value.push(lastAction)
+      uiStore.toast('Failed to undo keep', 'error')
+      return
+    }
+
     reviewedStore.unmarkReviewed(lastAction.asset.id)
     uiStore.decrementKept()
     if (lastAction.type === 'keepToAlbum' && lastAction.albumName) {
@@ -588,6 +576,7 @@ export function useImmich() {
     nextAsset,
     error,
     testConnection,
+    loadExternalDomain,
     loadInitialAsset,
     keepPhoto,
     keepPhotoToAlbum,

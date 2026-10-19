@@ -47,6 +47,8 @@ export const useAuthStore = defineStore('auth', () => {
   const apiKey = ref<string>('')
   const currentUserName = ref<string>('')
   const hasStoredConfig = ref<boolean>(false)
+  // Immich's public URL for "open in Immich" links, from its External Domain setting
+  const externalDomain = ref<string>('')
   const proxyBaseUrl = '/api'
 
   // .env state
@@ -144,6 +146,8 @@ export const useAuthStore = defineStore('auth', () => {
     return serverUrl.value.replace(/\/api\/?$/, '')
   })
 
+  const immichWebUrl = computed(() => externalDomain.value || immichBaseUrl.value)
+
   // Base URL for direct Immich API calls (always ends with /api)
   const apiBaseUrl = computed(() => {
     if (!serverUrl.value) return ''
@@ -161,6 +165,8 @@ export const useAuthStore = defineStore('auth', () => {
     isLoggedIn,
     hasStoredConfig,
     immichBaseUrl,
+    immichWebUrl,
+    externalDomain,
     apiBaseUrl,
     proxyBaseUrl,
     hasEnvConfig,

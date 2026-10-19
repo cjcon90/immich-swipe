@@ -32,11 +32,11 @@ const assetApiBaseUrl = computed(() => {
   return `${authStore.immichBaseUrl}${authStore.proxyBaseUrl}`
 })
 const assetPageUrl = computed(() => {
-  if (!authStore.immichBaseUrl) return ''
+  if (!authStore.immichWebUrl) return ''
   try {
-    const base = authStore.immichBaseUrl.endsWith('/')
-      ? authStore.immichBaseUrl
-      : `${authStore.immichBaseUrl}/`
+    const base = authStore.immichWebUrl.endsWith('/')
+      ? authStore.immichWebUrl
+      : `${authStore.immichWebUrl}/`
     return new URL(`photos/${encodeURIComponent(props.asset.id)}`, base).toString()
   } catch {
     return ''
@@ -185,7 +185,8 @@ async function fetchVideo() {
   videoAbortController.value = controller
 
   try {
-    const url = buildAssetApiUrl('original')
+    // Immich's browser-friendly transcode; iPhone HEVC .MOV originals don't play in most browsers
+    const url = buildAssetApiUrl('video/playback')
     const response = await fetch(url, {
       headers: getAuthHeaders(),
       signal: controller.signal,

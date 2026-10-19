@@ -47,8 +47,9 @@ FROM nginx:alpine
 # Copy built files
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# Copy nginx config
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Copy nginx config; IMMICH_URL is substituted at container start
+ENV IMMICH_URL=http://immich-server:2283
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 
 # Expose port
 EXPOSE 80

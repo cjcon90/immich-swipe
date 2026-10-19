@@ -28,15 +28,20 @@ describe('useImmich album flow', () => {
 
   beforeEach(() => {
     setActivePinia(createPinia())
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, ..._rest: unknown[]) => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn() })))
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString()
+
+      if (url.endsWith('/tags') && init?.method === 'PUT') {
+        return new Response(JSON.stringify([{ id: 'tag-1', name: 'Kept', value: 'Swipe/Kept' }]), { status: 200 })
+      }
+
+      if (url.includes('/search/random')) {
+        return new Response(JSON.stringify([dummyAsset]), { status: 200 })
+      }
 
       if (url.includes('/albums/')) {
         return new Response('{}', { status: 200 })
-      }
-
-      if (url.includes('/assets/random')) {
-        return new Response(JSON.stringify([dummyAsset]), { status: 200 })
       }
 
       if (url.includes('/thumbnail')) {
@@ -67,5 +72,42 @@ describe('useImmich album flow', () => {
       expect.stringContaining('/albums/album-1/assets'),
       expect.objectContaining({ method: 'PUT' })
     )
+  })
+
+  it('tags kept assets and untags them on undo', async () => {
+    const auth = useAuthStore()
+    auth.setConfig('http://immich.example.com', 'api-key', 'Alice')
+
+    const immich = useImmich()
+    immich.currentAsset.value = dummyAsset
+
+    await immich.keepPhoto()
+    const fetchMock = fetch as unknown as Mock
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/tags/tag-1/assets'),
+      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ ids: ['asset-1'] }) })
+    )
+
+    await immich.undoLastAction()
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/tags/tag-1/assets'),
+      expect.objectContaining({ method: 'DELETE', body: JSON.stringify({ ids: ['asset-1'] }) })
+    )
+  })
+
+  it('asks the server for random assets without the kept tag', async () => {
+    const auth = useAuthStore()
+    auth.setConfig('http://immich.example.com', 'api-key', 'Alice')
+
+    const immich = useImmich()
+    await immich.loadInitialAsset()
+
+    expect(immich.currentAsset.value?.id).toBe('asset-1')
+    const fetchMock = fetch as unknown as Mock
+    const [, init] = fetchMock.mock.calls.find(([url]) => String(url).includes('/search/random'))!
+    expect(JSON.parse(init.body).filter).toEqual({
+      tagIds: { none: ['tag-1'] },
+      visibility: { eq: 'timeline' },
+    })
   })
 })
